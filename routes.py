@@ -90,22 +90,65 @@ class ContextualModerationResponse(BaseModel):
     suggested_action: str
 
 # ==== Helpers ====
-def _log_usage(api_key_id, endpoint, duration_ms):
-           "/moderate/contextual",
-           size_est,
-           200,
-           duration_ms,
-           {"input": {"conversation_id": input.conversation_id,
-                      "messages": [{"sender_id": m.sender_id, "content": m.content} for m in input.messages][:50]},
-            "response": {
-                "safe": bool(parsed.get("safe", True)),
-                "risk_factors": parsed.get("risk_factors", []),
-                "suggested_action": parsed.get("suggested_action", "allow")
-            }}
-    print(f"API key {api_key_id} used {endpoint} in {duration_ms}ms")    
-)
+def _extract_json(text: str) -> Dict[str, Any]:
+    """
+    Pull the first JSON object from a model response. Falls back to {}.
+    """
+    if not text:
+        return {}
+    # Try direct parse
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+    # Try to find the first {...} block
+    m = re.search(r'\{(?:[^{}]|(?R))*\}', text, flags=re.DOTALL)
+    if m:
+        try:
+            return json.loads(m.group(0))
+        except Exception:
+            return {}
+    return {}
+
+def _log_usage(
+    api_key_id: Optional[int],
+    endpoint: str,
+    size_bytes: int,
+    status_code: int,
+    duration_ms: int,
+    details: Dict[str, Any]
+) -> None:
+    """
+    Best-effort logging to DB; never throws.
+    """
+    try:
+        db = SessionLocal()
+        try:
+            # Store as compact JSON string; adjust fields to your RequestLog schema.
+            payload_json = json.dumps(details, separators=(",", ":"), ensure_ascii=False)
+            log = RequestLog(
+                api_key_id=api_key_id,
+                endpoint=endpoint,
+                size_bytes=size_bytes,
+                status_code=status_code,
+                duration_ms=duration_ms,
+                payload_json=payload_json,  # if your column is named differently, update here
+            )
+            db.add(log)
+            db.commit()
+        finally:
+            db.close()
+    except Exception:
+        # Never block the request if logging fails
+        pass
+    # Always keep a simple stdout breadcrumb
+    print(f"[LOG] api_key_id={api_key_id} endpoint={endpoint} status={status_code} size={size_bytes} duration_ms={duration_ms}")
+
+# ==== ROUTES ====
+@router.post("/moderate/contextual", response_model=ContextualModerationResponse)
 async def moderate_contextual(request: Request, input: ContextualInput, api_key: str = Depends(rate_limit)):
     t0 = time.time()
+    endpoint = "/moderate/contextual"
     try:
         messages_formatted = "\n".join(
             [f"{m.timestamp or ''} {m.sender_id}: {m.content}" for m in input.messages]
@@ -133,19 +176,45 @@ async def moderate_contextual(request: Request, input: ContextualInput, api_key:
         )
 
         result_text = response.choices[0].message.content
-        parsed = _extract_json(result_text)
+        parsed = _extract_json(result_text) or {}
 
         duration_ms = int((time.time() - t0) * 1000)
         size_est = sum(len((m.content or "").encode("utf-8")) for m in input.messages)
-        _log_usage(getattr(request.state, "api_key_id", None), "/moderate/contextual", size_est, 200, duration_ms, parsed)
+
+        _log_usage(
+            getattr(request.state, "api_key_id", None),
+            endpoint,
+            size_est,
+            200,
+            duration_ms,
+            {
+                "input": {
+                    "conversation_id": input.conversation_id,
+                    "messages": [{"sender_id": m.sender_id, "content": m.content} for m in input.messages][:50],
+                },
+                "response": {
+                    "safe": bool(parsed.get("safe", True)),
+                    "risk_factors": parsed.get("risk_factors", []),
+                    "suggested_action": parsed.get("suggested_action", "allow"),
+                },
+            },
+        )
 
         return {
             "safe": bool(parsed.get("safe", True)),
             "risk_factors": parsed.get("risk_factors", []),
             "suggested_action": parsed.get("suggested_action", "allow"),
         }
+
     except Exception as e:
         duration_ms = int((time.time() - t0) * 1000)
-        size_est = sum(len((m.content or "").encode("utf-8")) for m in input.messages)
-        _log_usage(getattr(request.state, "api_key_id", None), "/moderate/contextual", size_est, 500, duration_ms, {"error": str(e)})
+        size_est = sum(len((m.content or "").encode("utf-8")) for m in input.messages) if input and input.messages else 0
+        _log_usage(
+            getattr(request.state, "api_key_id", None),
+            endpoint,
+            size_est,
+            500,
+            duration_ms,
+            {"error": str(e)},
+        )
         raise HTTPException(status_code=500, detail=f"Contextual moderation failed: {str(e)}")
