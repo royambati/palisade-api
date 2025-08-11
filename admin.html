@@ -9,25 +9,25 @@
     :root { --bg:#0b1220; --card:#111827; --muted:#9CA3AF; --text:#E5E7EB; --acc:#22d3ee; }
     body { margin:0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background: var(--bg); color: var(--text); }
     header { padding: 18px 20px; background: #0f172a; border-bottom: 1px solid #1f2937; display:flex; justify-content: space-between; align-items:center;}
-    .wrap { max-width: 1100px; margin: 0 auto; padding: 20px; }
+    .wrap { max-width: 1200px; margin: 0 auto; padding: 20px; }
     .card { background: var(--card); border:1px solid #1f2937; border-radius:14px; padding:16px; margin-bottom:16px; }
     label { font-size: 12px; color: var(--muted); display:block; margin-bottom:6px; }
     input, textarea, select { width:100%; padding:10px; border-radius:10px; border:1px solid #374151; background:#0b1220; color:var(--text); }
     button { padding:10px 14px; border-radius:10px; border:1px solid #374151; background:#0b1220; color:var(--text); cursor:pointer; }
     button:hover { border-color: var(--acc); }
-    .grid { display:grid; grid-template-columns: repeat(2,1fr); gap:16px; }
+    .grid { display:grid; grid-template-columns: repeat(3,1fr); gap:16px; }
     table { width:100%; border-collapse: collapse; font-size: 14px; }
     th, td { padding:10px; border-bottom:1px solid #1f2937; text-align:left; }
     th { color: var(--muted); font-weight:500; }
-    code, pre { background:#0b1220; color:#cbd5e1; border-radius:8px; padding:10px; overflow:auto; }
+    pre { background:#0b1220; color:#cbd5e1; border-radius:8px; padding:10px; overflow:auto; max-height: 380px;}
     .muted { color: var(--muted); font-size: 12px; }
-    .row { display:flex; gap:10px; align-items:center; }
+    .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
   </style>
 </head>
 <body>
   <header>
     <strong>Palisade Admin</strong>
-    <span class="muted">Self-serve keys · Logs · Revocation</span>
+    <span class="muted">Keys · Users · Logs</span>
   </header>
   <div class="wrap">
     <div class="card">
@@ -37,14 +37,28 @@
           <input id="secret" placeholder="enter your admin secret" />
         </div>
         <div>
-          <label>New Key Owner (name/email)</label>
+          <label>New Key Owner (email)</label>
           <div class="row">
             <input id="owner" placeholder="alpha@customer.com" />
             <button id="btnCreate">Create Key</button>
           </div>
+          <div class="muted">Key owner email is stored on the API key for search.</div>
+        </div>
+        <div>
+          <label>Search Logs</label>
+          <div class="row">
+            <input id="userEmail" placeholder="user email (contains)" style="min-width:220px" />
+            <input id="contains" placeholder="search text in input/response" style="min-width:240px" />
+            <select id="endpoint">
+              <option value="">any endpoint</option>
+              <option value="/moderate/text">/moderate/text</option>
+              <option value="/moderate/image">/moderate/image</option>
+              <option value="/moderate/contextual">/moderate/contextual</option>
+            </select>
+            <button id="btnSearch">Search</button>
+          </div>
         </div>
       </div>
-      <div class="muted" style="margin-top:8px">The secret is required for all admin actions.</div>
     </div>
 
     <div class="card">
@@ -53,33 +67,34 @@
         <button id="btnRefreshKeys">Refresh</button>
       </div>
       <table id="keysTbl">
-        <thead><tr><th>ID</th><th>Name</th><th>Prefix</th><th>Active</th><th>Actions</th></tr></thead>
+        <thead><tr><th>ID</th><th>Email</th><th>Prefix</th><th>Active</th><th>Actions</th></tr></thead>
         <tbody></tbody>
       </table>
     </div>
 
     <div class="card">
       <div class="row" style="justify-content: space-between;">
-        <strong>Recent Logs</strong>
+        <strong>Logs</strong>
         <div class="row">
           <input id="filterKeyId" placeholder="api_key_id (optional)" style="width:200px" />
           <button id="btnRefreshLogs">Refresh</button>
         </div>
       </div>
       <table id="logsTbl">
-        <thead><tr><th>ID</th><th>Key</th><th>Endpoint</th><th>Status</th><th>Duration</th><th>Timestamp</th></tr></thead>
+        <thead><tr><th>ID</th><th>User</th><th>Key</th><th>Endpoint</th><th>Status</th><th>Duration</th><th>Timestamp</th></tr></thead>
         <tbody></tbody>
       </table>
+
+      <div style="margin-top:10px">
+        <strong>Selected Log</strong>
+        <pre id="logDetail">// select a row to view input & response</pre>
+      </div>
     </div>
 
-    <div class="card">
-      <strong>Raw</strong>
-      <pre id="out">// responses here</pre>
-    </div>
   </div>
 
   <script>
-    const out = (v) => document.getElementById('out').textContent = typeof v === 'string' ? v : JSON.stringify(v, null, 2);
+    const out = (v) => document.getElementById('logDetail').textContent = typeof v === 'string' ? v : JSON.stringify(v, null, 2);
     const secret = () => document.getElementById('secret').value.trim();
 
     async function createKey() {
@@ -97,7 +112,6 @@
     async function loadKeys() {
       const res = await fetch('/admin/keys', { headers: { 'x-signup-secret': secret() } });
       const arr = await res.json();
-
       const tbody = document.querySelector('#keysTbl tbody');
       tbody.innerHTML = '';
       arr.forEach(k => {
@@ -107,12 +121,9 @@
           <td>\${k.name || ''}</td>
           <td>\${k.prefix}</td>
           <td>\${k.is_active ? 'true' : 'false'}</td>
-          <td>
-            <button data-id="\${k.id}" class="revoke">Revoke</button>
-          </td>\`;
+          <td><button data-id="\${k.id}" class="revoke">Revoke</button></td>\`;
         tbody.appendChild(tr);
       });
-
       document.querySelectorAll('button.revoke').forEach(btn => {
         btn.onclick = async () => {
           const id = btn.getAttribute('data-id');
@@ -129,19 +140,27 @@
 
     async function loadLogs() {
       const kid = document.getElementById('filterKeyId').value.trim();
+      const userEmail = document.getElementById('userEmail').value.trim();
+      const contains = document.getElementById('contains').value.trim();
+      const endpoint = document.getElementById('endpoint').value;
+
       const url = new URL('/admin/logs', window.location.origin);
       if (kid) url.searchParams.set('api_key_id', kid);
+      if (userEmail) url.searchParams.set('user_email', userEmail);
+      if (contains) url.searchParams.set('contains', contains);
+      if (endpoint) url.searchParams.set('endpoint', endpoint);
       url.searchParams.set('limit', '100');
 
       const res = await fetch(url.toString(), { headers: { 'x-signup-secret': secret() } });
       const data = await res.json();
+
       const tbody = document.querySelector('#logsTbl tbody');
       tbody.innerHTML = '';
-
       (data.items || []).forEach(l => {
         const tr = document.createElement('tr');
         tr.innerHTML = \`
-          <td>\${l.id}</td>
+          <td><a href="#" data-id="\${l.id}" class="loglink">\${l.id}</a></td>
+          <td>\${l.api_key_owner || ''}</td>
           <td>\${l.api_key_id ?? ''}</td>
           <td>\${l.endpoint}</td>
           <td>\${l.status_code}</td>
@@ -149,11 +168,21 @@
           <td>\${l.created_at || ''}</td>\`;
         tbody.appendChild(tr);
       });
-      out(data);
+
+      document.querySelectorAll('a.loglink').forEach(a => {
+        a.onclick = async (e) => {
+          e.preventDefault();
+          const id = a.getAttribute('data-id');
+          const res = await fetch('/admin/logs/' + id, { headers: { 'x-signup-secret': secret() } });
+          const data = await res.json();
+          out(data);
+        };
+      });
     }
 
     document.getElementById('btnCreate').onclick = createKey;
     document.getElementById('btnRefreshKeys').onclick = loadKeys;
+    document.getElementById('btnSearch').onclick = loadLogs;
     document.getElementById('btnRefreshLogs').onclick = loadLogs;
   </script>
 </body>
