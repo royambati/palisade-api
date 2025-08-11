@@ -96,12 +96,10 @@ def _extract_json(text: str) -> Dict[str, Any]:
     """
     if not text:
         return {}
-    # Try direct parse
     try:
         return json.loads(text)
     except Exception:
         pass
-    # Try to find the first {...} block
     m = re.search(r'\{(?:[^{}]|(?R))*\}', text, flags=re.DOTALL)
     if m:
         try:
@@ -109,6 +107,27 @@ def _extract_json(text: str) -> Dict[str, Any]:
         except Exception:
             return {}
     return {}
+
+def _as_dict(x) -> Dict[str, Any]:
+    """
+    Coerce SDK objects (e.g., pydantic models) to dicts safely.
+    """
+    if x is None:
+        return {}
+    if isinstance(x, dict):
+        return x
+    if hasattr(x, "model_dump") and callable(x.model_dump):
+        return x.model_dump()
+    if hasattr(x, "to_dict") and callable(x.to_dict):
+        return x.to_dict()
+    try:
+        return {
+            k: getattr(x, k)
+            for k in dir(x)
+            if not k.startswith("_") and not callable(getattr(x, k, None))
+        }
+    except Exception:
+        return {}
 
 def _log_usage(
     api_key_id: Optional[int],
@@ -138,7 +157,6 @@ def _log_usage(
         finally:
             db.close()
     except Exception:
-        # Never block the request if logging fails
         pass
     print(f"[LOG] api_key_id={api_key_id} endpoint={endpoint} status={status_code} size={size_bytes} duration_ms={duration_ms}")
 
@@ -155,13 +173,13 @@ async def moderate_text(request: Request, input: TextInput, api_key: str = Depen
         r = resp.results[0]
         flagged = bool(getattr(r, "flagged", False))
 
-        # categories where True
-        categories_dict = getattr(r, "categories", {}) or {}
-        cats = [k for k, v in categories_dict.items() if v]
+        # Coerce SDK objects to dicts safely
+        categories_dict = _as_dict(getattr(r, "categories", None))
+        cats = [k for k, v in categories_dict.items() if bool(v)]
 
-        # confidence ~ max category score (fallback 0.0)
-        cat_scores = getattr(r, "category_scores", {}) or {}
-        confidence = float(max(cat_scores.values())) if cat_scores else (1.0 if flagged else 0.0)
+        scores_dict = _as_dict(getattr(r, "category_scores", None))
+        numeric_scores = [float(v) for v in scores_dict.values() if isinstance(v, (int, float))]
+        confidence = float(max(numeric_scores)) if numeric_scores else (1.0 if flagged else 0.0)
 
         suggested_action = "allow"
         if flagged:
