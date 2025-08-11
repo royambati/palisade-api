@@ -90,7 +90,7 @@ class ContextualModerationResponse(BaseModel):
     suggested_action: str
 
 # ==== Helpers ====
-def _log_usage(getattr(request.state, "api_key_id", None),
+def _log_usage(api_key_id, endpoint, duration_ms):
            "/moderate/contextual",
            size_est,
            200,
@@ -101,7 +101,9 @@ def _log_usage(getattr(request.state, "api_key_id", None),
                 "safe": bool(parsed.get("safe", True)),
                 "risk_factors": parsed.get("risk_factors", []),
                 "suggested_action": parsed.get("suggested_action", "allow")
-            }})
+            }}
+    print(f"API key {api_key_id} used {endpoint} in {duration_ms}ms")    
+)
 async def moderate_contextual(request: Request, input: ContextualInput, api_key: str = Depends(rate_limit)):
     t0 = time.time()
     try:
