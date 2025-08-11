@@ -12,7 +12,8 @@ from db import SessionLocal, ApiKey, RequestLog, init_db
 from key_utils import hash_key
 
 router = APIRouter()
-client = openai.OpenAI(api_key=OPENAI_API_KEY)
+# Add a sane timeout so requests don't hang forever
+client = openai.OpenAI(api_key=OPENAI_API_KEY, timeout=15.0)
 
 # ==== API Key Auth ====
 api_key_header = APIKeyHeader(name="x-api-key", auto_error=False)
@@ -39,21 +40,23 @@ def get_api_key(request: Request, api_key: str = Security(api_key_header)) -> st
         return api_key
     raise HTTPException(status_code=401, detail="Invalid or missing API key")
 
-# ==== Simple in-memory token bucket per key ====
+# ==== Per-key token bucket (RPM + short burst) ====
+RATE_LIMIT_RPM = max(1, int(RATE_LIMIT_RPM))
+RATE_LIMIT_BURST = max(1, int(max(1, RATE_LIMIT_RPM // 2)))  # allow short bursts
+
 _buckets: Dict[str, Any] = {}
 def rate_limit(request: Request, api_key: str = Depends(get_api_key)):
     now = time.time()
-    window = 60.0
-    capacity = max(1, RATE_LIMIT_RPM)
-    refill = capacity / window  # tokens/sec
+    window_seconds = 60.0
+    capacity = RATE_LIMIT_BURST
+    refill_per_sec = RATE_LIMIT_RPM / window_seconds  # tokens/sec
 
     tokens, last = _buckets.get(api_key, (capacity, now))
-    tokens = min(capacity, tokens + (now - last) * refill)
-    if tokens >= 1.0:
-        tokens -= 1.0
-        _buckets[api_key] = (tokens, now)
-        return api_key
-    raise HTTPException(status_code=429, detail="Rate limit exceeded")
+    tokens = min(capacity, tokens + (now - last) * refill_per_sec)
+    if tokens < 1.0:
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+    _buckets[api_key] = (tokens - 1.0, now)
+    return api_key
 
 # ==== INPUT MODELS ====
 class TextInput(BaseModel):
@@ -91,9 +94,7 @@ class ContextualModerationResponse(BaseModel):
 
 # ==== Helpers ====
 def _extract_json(text: str) -> Dict[str, Any]:
-    """
-    Pull the first JSON object from a model response. Falls back to {}.
-    """
+    """Pull the first JSON object from a model response. Falls back to {}."""
     if not text:
         return {}
     try:
@@ -109,9 +110,7 @@ def _extract_json(text: str) -> Dict[str, Any]:
     return {}
 
 def _as_dict(x) -> Dict[str, Any]:
-    """
-    Coerce SDK objects (e.g., pydantic models) to dicts safely.
-    """
+    """Coerce SDK objects (e.g., pydantic models) to dicts safely."""
     if x is None:
         return {}
     if isinstance(x, dict):
@@ -137,9 +136,7 @@ def _log_usage(
     duration_ms: int,
     details: Dict[str, Any]
 ) -> None:
-    """
-    Best-effort logging to DB; never throws.
-    """
+    """Best-effort logging to DB; never throws."""
     try:
         db = SessionLocal()
         try:
@@ -160,12 +157,40 @@ def _log_usage(
         pass
     print(f"[LOG] api_key_id={api_key_id} endpoint={endpoint} status={status_code} size={size_bytes} duration_ms={duration_ms}")
 
+# ---- OpenAI error mapping → consistent HTTP codes ----
+def _map_openai_error(e: Exception) -> HTTPException:
+    try:
+        from openai import (
+            APIConnectionError, APIError, RateLimitError,
+            BadRequestError, AuthenticationError, PermissionDeniedError
+        )
+        if isinstance(e, BadRequestError):
+            return HTTPException(400, f"Bad request to model: {e}")
+        if isinstance(e, AuthenticationError):
+            return HTTPException(401, "Upstream auth failed")
+        if isinstance(e, PermissionDeniedError):
+            return HTTPException(403, "Upstream permission denied")
+        if isinstance(e, RateLimitError):
+            return HTTPException(429, "Upstream rate limited")
+        if isinstance(e, APIConnectionError):
+            return HTTPException(504, "Upstream connection error")
+        if isinstance(e, APIError):
+            return HTTPException(502, "Upstream model error")
+    except Exception:
+        # If import/classes differ, fall through to generic 500 below
+        pass
+    return HTTPException(500, "Unexpected moderation error")
+
 # ==== ROUTES: TEXT ====
 @router.post("/moderate/text", response_model=TextModerationResponse)
 async def moderate_text(request: Request, input: TextInput, api_key: str = Depends(rate_limit)):
     t0 = time.time()
     endpoint = "/moderate/text"
     try:
+        # Input validation
+        if not input.text or not input.text.strip():
+            raise HTTPException(400, "text is required")
+
         resp = client.moderations.create(
             model="omni-moderation-latest",
             input=input.text
@@ -178,7 +203,12 @@ async def moderate_text(request: Request, input: TextInput, api_key: str = Depen
         cats = [k for k, v in categories_dict.items() if bool(v)]
 
         scores_dict = _as_dict(getattr(r, "category_scores", None))
-        numeric_scores = [float(v) for v in scores_dict.values() if isinstance(v, (int, float))]
+        numeric_scores: List[float] = []
+        for v in scores_dict.values():
+            try:
+                numeric_scores.append(float(v))
+            except Exception:
+                pass
         confidence = float(max(numeric_scores)) if numeric_scores else (1.0 if flagged else 0.0)
 
         suggested_action = "allow"
@@ -211,6 +241,9 @@ async def moderate_text(request: Request, input: TextInput, api_key: str = Depen
             "suggested_action": suggested_action,
         }
 
+    except HTTPException:
+        # Already mapped; still log below in middleware
+        raise
     except Exception as e:
         duration_ms = int((time.time() - t0) * 1000)
         size_est = len((input.text or "").encode("utf-8")) if input and input.text else 0
@@ -222,7 +255,7 @@ async def moderate_text(request: Request, input: TextInput, api_key: str = Depen
             duration_ms,
             {"error": str(e)},
         )
-        raise HTTPException(status_code=500, detail=f"Text moderation failed: {str(e)}")
+        raise _map_openai_error(e)
 
 # ==== ROUTES: IMAGE ====
 @router.post("/moderate/image", response_model=ImageModerationResponse)
@@ -230,6 +263,12 @@ async def moderate_image(request: Request, input: ImageInput, api_key: str = Dep
     t0 = time.time()
     endpoint = "/moderate/image"
     try:
+        # Input validation
+        if not input.image_url or not input.image_url.strip():
+            raise HTTPException(400, "image_url is required")
+        if not re.match(r"^https?://", input.image_url.strip(), flags=re.I):
+            raise HTTPException(400, "image_url must be http(s)")
+
         system_prompt = (
             "You are a content moderation system. Analyze the image and return ONLY a JSON object with:\n"
             "{"
@@ -260,7 +299,10 @@ async def moderate_image(request: Request, input: ImageInput, api_key: str = Dep
 
         safe = bool(parsed.get("safe", True))
         categories = parsed.get("categories", [])
-        confidence = float(parsed.get("confidence", 0.0))
+        try:
+            confidence = float(parsed.get("confidence", 0.0))
+        except Exception:
+            confidence = 0.0
         suggested_action = parsed.get("suggested_action", "allow")
 
         duration_ms = int((time.time() - t0) * 1000)
@@ -289,6 +331,8 @@ async def moderate_image(request: Request, input: ImageInput, api_key: str = Dep
             "suggested_action": suggested_action,
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         duration_ms = int((time.time() - t0) * 1000)
         size_est = len((input.image_url or "").encode("utf-8")) if input and input.image_url else 0
@@ -300,7 +344,7 @@ async def moderate_image(request: Request, input: ImageInput, api_key: str = Dep
             duration_ms,
             {"error": str(e)},
         )
-        raise HTTPException(status_code=500, detail=f"Image moderation failed: {str(e)}")
+        raise _map_openai_error(e)
 
 # ==== ROUTES: CONTEXTUAL ====
 @router.post("/moderate/contextual", response_model=ContextualModerationResponse)
@@ -308,6 +352,14 @@ async def moderate_contextual(request: Request, input: ContextualInput, api_key:
     t0 = time.time()
     endpoint = "/moderate/contextual"
     try:
+        # Input validation
+        if not input.conversation_id or not input.conversation_id.strip():
+            raise HTTPException(400, "conversation_id is required")
+        if not input.messages or not isinstance(input.messages, list):
+            raise HTTPException(400, "messages[] is required")
+        if not any((m.content or "").strip() for m in input.messages):
+            raise HTTPException(400, "at least one message with content is required")
+
         messages_formatted = "\n".join(
             [f"{m.timestamp or ''} {m.sender_id}: {m.content}" for m in input.messages]
         )
@@ -364,6 +416,8 @@ async def moderate_contextual(request: Request, input: ContextualInput, api_key:
             "suggested_action": parsed.get("suggested_action", "allow"),
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         duration_ms = int((time.time() - t0) * 1000)
         size_est = sum(len((m.content or "").encode("utf-8")) for m in input.messages) if input and input.messages else 0
@@ -375,4 +429,4 @@ async def moderate_contextual(request: Request, input: ContextualInput, api_key:
             duration_ms,
             {"error": str(e)},
         )
-        raise HTTPException(status_code=500, detail=f"Contextual moderation failed: {str(e)}")
+        raise _map_openai_error(e)
