@@ -11,20 +11,13 @@ from config import OPENAI_API_KEY, PALISADE_API_KEYS, RATE_LIMIT_RPM
 from db import SessionLocal, ApiKey, RequestLog, init_db
 from key_utils import hash_key
 
+MAX_RESULT_BYTES = 100 * 1024  # 100KB cap for stored moderation_result
+
 router = APIRouter()
 client = openai.OpenAI(api_key=OPENAI_API_KEY)
 
 # ==== API Key Auth ====
 api_key_header = APIKeyHeader(name="x-api-key", auto_error=False)
-
-def _safe_max_score(scores) -> float:
-    try:
-        d = dict(scores) if scores is not None else {}
-        vals = [float(v) for v in d.values() if isinstance(v, (int, float)) and v is not None]
-        return max(vals) if vals else 0.0
-    except Exception:
-        return 0.0
-
 
 def get_api_key(request: Request, api_key: str = Security(api_key_header)) -> str:
     init_db()
@@ -104,13 +97,23 @@ def _log_usage(api_key_id: Optional[int], endpoint: str, request_size_bytes: int
         init_db()
         db = SessionLocal()
         try:
+            # Serialize moderation_result and cap size for storage
+            import json as _json
+            if isinstance(moderation_result, (dict, list)):
+                blob = _json.dumps(moderation_result)
+            elif hasattr(moderation_result, "model_dump_json"):
+                blob = moderation_result.model_dump_json()
+            else:
+                blob = str(moderation_result)
+            if len(blob.encode("utf-8")) > MAX_RESULT_BYTES:
+                blob = blob.encode("utf-8")[:MAX_RESULT_BYTES].decode("utf-8", errors="ignore") + "...(truncated)"
             rl = RequestLog(
                 api_key_id=api_key_id,
                 endpoint=endpoint,
                 request_size_bytes=request_size_bytes,
                 status_code=status_code,
                 duration_ms=duration_ms,
-                moderation_result=moderation_result if isinstance(moderation_result, (dict, list)) else str(moderation_result),
+                moderation_result=blob,
             )
             db.add(rl)
             db.commit()
@@ -148,7 +151,7 @@ async def moderate_text(request: Request, input: TextInput, api_key: str = Depen
 
         flagged = result.flagged
         categories = [cat for cat, val in dict(result.categories).items() if val]
-        max_score = _safe_max_score(getattr(result, "category_scores", None))
+        max_score = max(dict(result.category_scores).values()) if result.category_scores else 0.0
 
         body = {
             "safe": not flagged,
@@ -190,7 +193,6 @@ async def moderate_image(request: Request, input: ImageInput, api_key: str = Dep
             ],
             max_tokens=300
         )
-
         result_text = response.choices[0].message.content
         parsed = _extract_json(result_text)
 
