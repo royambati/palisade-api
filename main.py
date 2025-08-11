@@ -81,6 +81,31 @@ app.include_router(router)
 app.include_router(keys_router)
 app.include_router(debug_router)
 
+from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
+def _err(payload, req_id=None, status=400):
+    body = {"error": payload}
+    if req_id:
+        body["request_id"] = req_id
+    return JSONResponse(status_code=status, content=body)
+
+@app.exception_handler(StarletteHTTPException)
+async def http_exc_handler(request, exc):
+    req_id = request.headers.get("x-request-id")
+    return _err({"type": "http_error", "message": exc.detail}, req_id=req_id, status=exc.status_code)
+
+@app.exception_handler(RequestValidationError)
+async def validation_exc_handler(request, exc):
+    req_id = request.headers.get("x-request-id")
+    return _err({"type": "validation_error", "message": "Invalid request", "details": exc.errors()}, req_id=req_id, status=422)
+
+@app.exception_handler(Exception)
+async def unhandled_exc_handler(request, exc):
+    req_id = request.headers.get("x-request-id")
+    return _err({"type": "internal_error", "message": "Internal Server Error"}, req_id=req_id, status=500)
+
 @app.on_event("startup")
 async def _log_config_on_startup():
     try:
