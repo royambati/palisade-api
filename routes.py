@@ -124,7 +124,6 @@ def _log_usage(
     try:
         db = SessionLocal()
         try:
-            # Store as compact JSON string; adjust fields to your RequestLog schema.
             payload_json = json.dumps(details, separators=(",", ":"), ensure_ascii=False)
             log = RequestLog(
                 api_key_id=api_key_id,
@@ -132,7 +131,7 @@ def _log_usage(
                 size_bytes=size_bytes,
                 status_code=status_code,
                 duration_ms=duration_ms,
-                payload_json=payload_json,  # if your column is named differently, update here
+                payload_json=payload_json,  # adjust if your column name differs
             )
             db.add(log)
             db.commit()
@@ -141,10 +140,151 @@ def _log_usage(
     except Exception:
         # Never block the request if logging fails
         pass
-    # Always keep a simple stdout breadcrumb
     print(f"[LOG] api_key_id={api_key_id} endpoint={endpoint} status={status_code} size={size_bytes} duration_ms={duration_ms}")
 
-# ==== ROUTES ====
+# ==== ROUTES: TEXT ====
+@router.post("/moderate/text", response_model=TextModerationResponse)
+async def moderate_text(request: Request, input: TextInput, api_key: str = Depends(rate_limit)):
+    t0 = time.time()
+    endpoint = "/moderate/text"
+    try:
+        resp = client.moderations.create(
+            model="omni-moderation-latest",
+            input=input.text
+        )
+        r = resp.results[0]
+        flagged = bool(getattr(r, "flagged", False))
+
+        # categories where True
+        categories_dict = getattr(r, "categories", {}) or {}
+        cats = [k for k, v in categories_dict.items() if v]
+
+        # confidence ~ max category score (fallback 0.0)
+        cat_scores = getattr(r, "category_scores", {}) or {}
+        confidence = float(max(cat_scores.values())) if cat_scores else (1.0 if flagged else 0.0)
+
+        suggested_action = "allow"
+        if flagged:
+            suggested_action = "block" if confidence >= 0.9 else "escalate"
+
+        duration_ms = int((time.time() - t0) * 1000)
+        size_est = len((input.text or "").encode("utf-8"))
+        _log_usage(
+            getattr(request.state, "api_key_id", None),
+            endpoint,
+            size_est,
+            200,
+            duration_ms,
+            {
+                "input": {"text_preview": (input.text[:2000] if input.text else "")},
+                "response": {
+                    "safe": not flagged,
+                    "categories": cats,
+                    "confidence": confidence,
+                    "suggested_action": suggested_action,
+                },
+            },
+        )
+
+        return {
+            "safe": not flagged,
+            "categories": cats,
+            "confidence": confidence,
+            "suggested_action": suggested_action,
+        }
+
+    except Exception as e:
+        duration_ms = int((time.time() - t0) * 1000)
+        size_est = len((input.text or "").encode("utf-8")) if input and input.text else 0
+        _log_usage(
+            getattr(request.state, "api_key_id", None),
+            endpoint,
+            size_est,
+            500,
+            duration_ms,
+            {"error": str(e)},
+        )
+        raise HTTPException(status_code=500, detail=f"Text moderation failed: {str(e)}")
+
+# ==== ROUTES: IMAGE ====
+@router.post("/moderate/image", response_model=ImageModerationResponse)
+async def moderate_image(request: Request, input: ImageInput, api_key: str = Depends(rate_limit)):
+    t0 = time.time()
+    endpoint = "/moderate/image"
+    try:
+        system_prompt = (
+            "You are a content moderation system. Analyze the image and return ONLY a JSON object with:\n"
+            "{"
+            "\"safe\": true/false, "
+            "\"categories\": [\"string\"], "
+            "\"confidence\": 0.0-1.0, "
+            "\"suggested_action\": \"allow/escalate/block\""
+            "}\n"
+            "No extra text."
+        )
+
+        resp = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Moderate this image:"},
+                        {"type": "image_url", "image_url": {"url": input.image_url}},
+                    ],
+                },
+            ],
+            max_tokens=200,
+        )
+        result_text = resp.choices[0].message.content
+        parsed = _extract_json(result_text) or {}
+
+        safe = bool(parsed.get("safe", True))
+        categories = parsed.get("categories", [])
+        confidence = float(parsed.get("confidence", 0.0))
+        suggested_action = parsed.get("suggested_action", "allow")
+
+        duration_ms = int((time.time() - t0) * 1000)
+        size_est = len((input.image_url or "").encode("utf-8"))
+        _log_usage(
+            getattr(request.state, "api_key_id", None),
+            endpoint,
+            size_est,
+            200,
+            duration_ms,
+            {
+                "input": {"image_url": input.image_url},
+                "response": {
+                    "safe": safe,
+                    "categories": categories,
+                    "confidence": confidence,
+                    "suggested_action": suggested_action,
+                },
+            },
+        )
+
+        return {
+            "safe": safe,
+            "categories": categories,
+            "confidence": confidence,
+            "suggested_action": suggested_action,
+        }
+
+    except Exception as e:
+        duration_ms = int((time.time() - t0) * 1000)
+        size_est = len((input.image_url or "").encode("utf-8")) if input and input.image_url else 0
+        _log_usage(
+            getattr(request.state, "api_key_id", None),
+            endpoint,
+            size_est,
+            500,
+            duration_ms,
+            {"error": str(e)},
+        )
+        raise HTTPException(status_code=500, detail=f"Image moderation failed: {str(e)}")
+
+# ==== ROUTES: CONTEXTUAL ====
 @router.post("/moderate/contextual", response_model=ContextualModerationResponse)
 async def moderate_contextual(request: Request, input: ContextualInput, api_key: str = Depends(rate_limit)):
     t0 = time.time()
