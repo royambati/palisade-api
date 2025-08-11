@@ -4,9 +4,9 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.concurrency import iterate_in_threadpool
 import logging, json, uuid, time, pathlib
 
-from config import LOG_LEVEL, SIGNUP_SECRET
+from config import LOG_LEVEL
 from routes import router
-from routes_keys import router as keys_router, debug_router
+from routes_keys import router as keys_router
 
 # Configure logging
 logging.basicConfig(level=getattr(logging, LOG_LEVEL.upper(), logging.INFO))
@@ -79,46 +79,6 @@ app.add_middleware(LoggingMiddleware)
 # Mount routers
 app.include_router(router)
 app.include_router(keys_router)
-app.include_router(debug_router)
-
-from fastapi.responses import JSONResponse
-from fastapi.exceptions import RequestValidationError
-from starlette.exceptions import HTTPException as StarletteHTTPException
-
-def _err(payload, req_id=None, status=400):
-    body = {"error": payload}
-    if req_id:
-        body["request_id"] = req_id
-    return JSONResponse(status_code=status, content=body)
-
-@app.exception_handler(StarletteHTTPException)
-async def http_exc_handler(request, exc):
-    req_id = request.headers.get("x-request-id")
-    return _err({"type": "http_error", "message": exc.detail}, req_id=req_id, status=exc.status_code)
-
-@app.exception_handler(RequestValidationError)
-async def validation_exc_handler(request, exc):
-    req_id = request.headers.get("x-request-id")
-    return _err({"type": "validation_error", "message": "Invalid request", "details": exc.errors()}, req_id=req_id, status=422)
-
-@app.exception_handler(Exception)
-async def unhandled_exc_handler(request, exc):
-    req_id = request.headers.get("x-request-id")
-    return _err({"type": "internal_error", "message": "Internal Server Error"}, req_id=req_id, status=500)
-
-@app.on_event("startup")
-async def _log_config_on_startup():
-    try:
-        val = SIGNUP_SECRET or ""
-        prefix = (val and __import__("hashlib").sha256(val.encode()).hexdigest()[:12]) or None
-        logger.info(json.dumps({
-            "event": "startup_config",
-            "signup_secret_present": bool(val),
-            "signup_secret_len": len(val),
-            "signup_secret_sha256_prefix": prefix
-        }))
-    except Exception:
-        logger.exception("Failed to log startup config")
 
 @app.get("/", tags=["Health"])
 def health():
@@ -130,3 +90,13 @@ async def test_page():
     if p.exists():
         return HTMLResponse(p.read_text(encoding="utf-8"))
     return HTMLResponse("<h3>Missing test.html</h3>")
+
+from fastapi.responses import HTMLResponse as _HTMLResponse
+import pathlib as _pl
+
+@app.get("/admin", response_class=_HTMLResponse)
+async def admin_page():
+    p = _pl.Path("admin.html")
+    if p.exists():
+        return _HTMLResponse(p.read_text(encoding="utf-8"))
+    return _HTMLResponse("<h3>Missing admin.html</h3>")
