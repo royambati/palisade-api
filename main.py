@@ -3,6 +3,8 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.concurrency import iterate_in_threadpool
 import logging, json, uuid, time, pathlib
+from fastapi.middleware.cors import CORSMiddleware
+
 
 from config import LOG_LEVEL
 from routes import router
@@ -16,6 +18,14 @@ app = FastAPI(
     title="Palisade Moderation API",
     description="Real-time, contextual moderation for text and image content. Built for speed, accuracy, and developer ease.",
     version="1.2.0"
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # for now, allow all
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # ===== Middleware for request ID + structured logging =====
