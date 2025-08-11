@@ -2,11 +2,12 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.concurrency import iterate_in_threadpool
-import logging, json, uuid, time, pathlib
 from fastapi.middleware.cors import CORSMiddleware
-
+from fastapi.routing import APIRoute
+import logging, json, uuid, time, pathlib
 
 from config import LOG_LEVEL
+from db import init_db
 from routes import router
 from routes_keys import router as keys_router
 
@@ -17,22 +18,43 @@ logger = logging.getLogger("palisade")
 app = FastAPI(
     title="Palisade Moderation API",
     description="Real-time, contextual moderation for text and image content. Built for speed, accuracy, and developer ease.",
-    version="1.2.0"
+    version="1.2.0",
 )
 
+# CORS (keep permissive for now; tighten later)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # for now, allow all
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ===== Startup: init DB once + list routes =====
+@app.on_event("startup")
+async def on_startup():
+    try:
+        logger.info("Initializing database...")
+        init_db()
+        logger.info("DB initialized.")
+    except Exception:
+        logger.exception("DB init failed (continuing; routes may still work).")
+
+    # Print mounted routes for quick sanity check
+    try:
+        logger.info("=== ROUTES ===")
+        for r in app.router.routes:
+            if isinstance(r, APIRoute):
+                logger.info(f"{','.join(sorted(r.methods)):<10} {r.path}")
+    except Exception:
+        logger.exception("Failed to print routes")
 
 # ===== Middleware for request ID + structured logging =====
 class LoggingMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         start_time = time.time()
         req_id = request.headers.get("x-request-id") or str(uuid.uuid4())
+        request.state.request_id = req_id  # make available downstream
 
         # Read and stash body for downstream
         try:
@@ -86,10 +108,11 @@ class LoggingMiddleware(BaseHTTPMiddleware):
 
 app.add_middleware(LoggingMiddleware)
 
-# Mount routers
-app.include_router(router)
-app.include_router(keys_router)
+# ===== Mount routers =====
+app.include_router(router)        # /moderate/*
+app.include_router(keys_router)   # /keys/* (create/revoke/etc.)
 
+# ===== Health & static test/admin pages =====
 @app.get("/", tags=["Health"])
 def health():
     return {"status": "ok"}
