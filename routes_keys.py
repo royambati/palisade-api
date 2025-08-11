@@ -1,9 +1,11 @@
 from fastapi import APIRouter, Depends, HTTPException, Header
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
+from sqlalchemy import desc, cast
+from sqlalchemy.types import String
 from typing import Optional, List
 from config import SIGNUP_SECRET, KEY_PREFIX, KEY_BYTES
-from db import SessionLocal, ApiKey, init_db
+from db import SessionLocal, ApiKey, RequestLog, init_db
 from key_utils import generate_key, hash_key
 
 init_db()
@@ -80,24 +82,102 @@ def admin_revoke(key_id: int, db: Session = Depends(get_db), _ok=Depends(require
     db.commit()
     return {"ok": True, "message": f"Key {key_id} revoked"}
 
-from sqlalchemy import desc
-from db import RequestLog
+# ===== Debug endpoint (no secret value leak) =====
+import hashlib as _hl
+from fastapi import APIRouter as _AR
+from config import SIGNUP_SECRET as _SS
+
+debug_router = _AR()
+
+@debug_router.get("/_debug/signups")
+def debug_signups():
+    val = _SS or ""
+    return {
+        "signup_secret_present": bool(val),
+        "signup_secret_len": len(val),
+        "signup_secret_sha256_prefix": _hl.sha256(val.encode()).hexdigest()[:12] if val else None
+    }
+
 
 @router.get("/admin/logs", summary="List recent request logs (admin)")
-def admin_logs(limit: int = 50, offset: int = 0, api_key_id: int = None, db: Session = Depends(get_db), _ok=Depends(require_signup_secret)):
+def admin_logs(
+    limit: int = 50,
+    offset: int = 0,
+    api_key_id: int = None,
+    user_email: str = None,
+    contains: str = None,
+    endpoint: str = None,
+    db: Session = Depends(get_db),
+    _ok=Depends(require_signup_secret)
+):
     q = db.query(RequestLog).order_by(desc(RequestLog.id))
+
+    # Filter by endpoint
+    if endpoint:
+        q = q.filter(RequestLog.endpoint == endpoint)
+
+    # Filter by api_key_id
     if api_key_id is not None:
         q = q.filter(RequestLog.api_key_id == api_key_id)
+
+    # Filter by email via ApiKey.name (owner/email field)
+    if user_email:
+        key_ids = [r.id for r in db.query(ApiKey.id).filter(ApiKey.name.ilike(f"%{user_email}%")).all()]
+        if key_ids:
+            q = q.filter(RequestLog.api_key_id.in_(key_ids))
+        else:
+            return {"items": [], "limit": limit, "offset": offset}
+
+    # Search 'contains' within moderation_result JSON/Text
+    if contains:
+        q = q.filter(cast(RequestLog.moderation_result, String).ilike(f"%{contains}%"))
+
     rows = q.offset(offset).limit(min(max(limit, 1), 500)).all()
+
+    # Map api_key_id -> owner (email/name)
+    key_rows = db.query(ApiKey.id, ApiKey.name).all()
+    owner_map = {kid: nm for kid, nm in key_rows}
+
     out = []
     for r in rows:
+        preview = None
+        try:
+            blob = r.moderation_result
+            preview = blob if isinstance(blob, str) else str(blob)
+            if len(preview) > 600:
+                preview = preview[:600] + "...(truncated)"
+        except Exception:
+            preview = None
         out.append({
             "id": r.id,
             "api_key_id": r.api_key_id,
+            "api_key_owner": owner_map.get(r.api_key_id),
             "endpoint": r.endpoint,
             "status_code": r.status_code,
             "duration_ms": r.duration_ms,
             "request_size_bytes": r.request_size_bytes,
-            "created_at": r.created_at.isoformat() if hasattr(r.created_at, "isoformat") and r.created_at else None
+            "created_at": r.created_at.isoformat() if hasattr(r.created_at, "isoformat") and r.created_at else None,
+            "moderation_result_preview": preview
         })
     return {"items": out, "limit": limit, "offset": offset}
+
+
+
+@router.get("/admin/logs/{log_id}", summary="Get full log record (admin)")
+def admin_log_detail(log_id: int, db: Session = Depends(get_db), _ok=Depends(require_signup_secret)):
+    r = db.query(RequestLog).get(log_id)
+    if not r:
+        raise HTTPException(status_code=404, detail="Log not found")
+    owner = db.query(ApiKey).get(r.api_key_id) if r.api_key_id else None
+    return {
+        "id": r.id,
+        "api_key_id": r.api_key_id,
+        "api_key_owner": getattr(owner, "name", None),
+        "endpoint": r.endpoint,
+        "status_code": r.status_code,
+        "duration_ms": r.duration_ms,
+        "request_size_bytes": r.request_size_bytes,
+        "created_at": r.created_at.isoformat() if hasattr(r.created_at, "isoformat") and r.created_at else None,
+        "moderation_result": r.moderation_result,
+    }
+
