@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Palisade API Playground</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; max-width: 760px; margin: 40px auto; padding: 24px; background: #fff; color: #0f172a; }
+    h2 { margin: 0 0 16px; }
+    label { display:block; font-weight:600; margin: 12px 0 6px; }
+    input, textarea { width: 100%; padding: 10px; border: 1px solid #e2e8f0; border-radius: 8px; background: #f8fafc; }
+    button { margin-top: 10px; padding: 10px 14px; border: 0; border-radius: 8px; background: #0f172a; color: #fff; cursor: pointer; }
+    button:hover { opacity: .9; }
+    pre { background: #0b1220; color: #e5e7eb; border-radius: 8px; padding: 14px; overflow: auto; }
+    hr { border: none; border-top: 1px solid #e2e8f0; margin: 24px 0; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  </style>
+</head>
+<body>
+  <h2>🛡️ Palisade API Playground</h2>
+
+  <label>API Key (x-api-key)</label>
+  <input id="apiKey" type="password" placeholder="pal_live_...">
+
+  <hr/>
+
+  <h3>Create API Key</h3>
+  <div class="row">
+    <input id="keyName" placeholder="Name or email (optional)">
+    <input id="signupSecret" placeholder="x-signup-secret header (if required)">
+  </div>
+  <button id="btnCreateKey">POST /keys</button>
+
+  <hr/>
+
+  <h3>Moderate Text</h3>
+  <textarea id="textInput" rows="4" placeholder="Type something..."></textarea>
+  <button id="btnText">POST /moderate/text</button>
+
+  <h3>Moderate Image</h3>
+  <input id="imageUrl" type="text" placeholder="https://...">
+  <button id="btnImage">POST /moderate/image</button>
+
+  <h3>Moderate Contextual</h3>
+  <textarea id="ctxMessages" rows="6" placeholder="u1: hey
+u2: sup"></textarea>
+  <input id="ctxId" type="text" placeholder="Conversation ID" value="demo-1">
+  <button id="btnContext">POST /moderate/contextual</button>
+
+  <hr/>
+  <label><strong>Response</strong></label>
+  <pre id="output">// Output will appear here...</pre>
+
+  <script>
+    const out = (obj) => document.getElementById('output').textContent = typeof obj === 'string' ? obj : JSON.stringify(obj, null, 2);
+    const headers = () => {
+      const h = { 'Content-Type': 'application/json' };
+      const key = document.getElementById('apiKey').value.trim();
+      if (key) h['x-api-key'] = key;
+      return h;
+    };
+
+    document.getElementById('btnCreateKey').onclick = async () => {
+      try {
+        const name = document.getElementById('keyName').value;
+        const secret = document.getElementById('signupSecret').value;
+        const res = await fetch('/keys', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...(secret ? {'x-signup-secret': secret} : {}) },
+          body: JSON.stringify({ name })
+        });
+        out(await res.json());
+      } catch (e) { out(String(e)); }
+    };
+
+    document.getElementById('btnText').onclick = async () => {
+      try {
+        const text = document.getElementById('textInput').value;
+        const res = await fetch('/moderate/text', { method: 'POST', headers: headers(), body: JSON.stringify({ text }) });
+        out(await res.json());
+      } catch (e) { out(String(e)); }
+    };
+
+    document.getElementById('btnImage').onclick = async () => {
+      try {
+        const image_url = document.getElementById('imageUrl').value;
+        const res = await fetch('/moderate/image', { method: 'POST', headers: headers(), body: JSON.stringify({ image_url }) });
+        out(await res.json());
+      } catch (e) { out(String(e)); }
+    };
+
+    document.getElementById('btnContext').onclick = async () => {
+      try {
+        const lines = document.getElementById('ctxMessages').value.trim().split('\n');
+        const messages = lines.map(l => { const i = l.indexOf(':'); return { sender_id: l.slice(0, i).trim(), content: l.slice(i+1).trim() }; });
+        const conversation_id = document.getElementById('ctxId').value;
+        const res = await fetch('/moderate/contextual', { method: 'POST', headers: headers(), body: JSON.stringify({ conversation_id, messages }) });
+        out(await res.json());
+      } catch (e) { out(String(e)); }
+    };
+  </script>
+</body>
+</html>
