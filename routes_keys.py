@@ -5,9 +5,6 @@ from typing import Optional, List
 from config import SIGNUP_SECRET, KEY_PREFIX, KEY_BYTES
 from db import SessionLocal, ApiKey, init_db
 from key_utils import generate_key, hash_key
-import hashlib as _hl
-from fastapi import APIRouter as _AR
-from config import SIGNUP_SECRET as _SS
 
 init_db()
 router = APIRouter()
@@ -32,13 +29,13 @@ def get_db():
     finally:
         db.close()
 
-def require_signup_secret(x_signup_secret: Optional[str] = Header(default=None)):
+def require_signup_secret(x_signup_secret: Optional[str] = Header(default=None, convert_underscores=False)):
     # In prod, require header to match SIGNUP_SECRET; in dev (unset), allow.
     if SIGNUP_SECRET:
         if not x_signup_secret or x_signup_secret != SIGNUP_SECRET:
             raise HTTPException(status_code=401, detail="Missing or invalid signup secret")
 
-def get_api_key_record(x_api_key: Optional[str] = Header(default=None), db: Session = Depends(get_db)) -> ApiKey:
+def get_api_key_record(x_api_key: Optional[str] = Header(default=None, convert_underscores=False), db: Session = Depends(get_db)) -> ApiKey:
     if not x_api_key:
         raise HTTPException(status_code=401, detail="Missing API key")
     rows = db.query(ApiKey).filter(ApiKey.is_active == True).all()
@@ -83,15 +80,24 @@ def admin_revoke(key_id: int, db: Session = Depends(get_db), _ok=Depends(require
     db.commit()
     return {"ok": True, "message": f"Key {key_id} revoked"}
 
-# ===== Debug endpoint (no secret value leak) =====
+from sqlalchemy import desc
+from db import RequestLog
 
-debug_router = _AR()
-
-@debug_router.get("/_debug/signups")
-def debug_signups():
-    val = _SS or ""
-    return {
-        "signup_secret_present": bool(val),
-        "signup_secret_len": len(val),
-        "signup_secret_sha256_prefix": _hl.sha256(val.encode()).hexdigest()[:12] if val else None
-    }
+@router.get("/admin/logs", summary="List recent request logs (admin)")
+def admin_logs(limit: int = 50, offset: int = 0, api_key_id: int = None, db: Session = Depends(get_db), _ok=Depends(require_signup_secret)):
+    q = db.query(RequestLog).order_by(desc(RequestLog.id))
+    if api_key_id is not None:
+        q = q.filter(RequestLog.api_key_id == api_key_id)
+    rows = q.offset(offset).limit(min(max(limit, 1), 500)).all()
+    out = []
+    for r in rows:
+        out.append({
+            "id": r.id,
+            "api_key_id": r.api_key_id,
+            "endpoint": r.endpoint,
+            "status_code": r.status_code,
+            "duration_ms": r.duration_ms,
+            "request_size_bytes": r.request_size_bytes,
+            "created_at": r.created_at.isoformat() if hasattr(r.created_at, "isoformat") and r.created_at else None
+        })
+    return {"items": out, "limit": limit, "offset": offset}
