@@ -19,6 +19,27 @@ client = openai.OpenAI(api_key=OPENAI_API_KEY)
 # ==== API Key Auth ====
 api_key_header = APIKeyHeader(name="x-api-key", auto_error=False)
 
+def _safe_max_score(scores) -> float:
+    try:
+        d = dict(scores) if scores is not None else {}
+        vals = []
+        for v in d.values():
+            try:
+                # allow ints/floats/strings that cast; skip None/objects
+                fv = float(v)
+                vals.append(fv)
+            except Exception:
+                pass
+        return max(vals) if vals else 0.0
+    except Exception:
+        return 0.0
+
+def _to_float(x, default=0.0):
+    try:
+        return float(x)
+    except Exception:
+        return default
+
 def get_api_key(request: Request, api_key: str = Security(api_key_header)) -> str:
     init_db()
     # 1) Try DB-backed keys
@@ -151,7 +172,7 @@ async def moderate_text(request: Request, input: TextInput, api_key: str = Depen
 
         flagged = result.flagged
         categories = [cat for cat, val in dict(result.categories).items() if val]
-        max_score = max(dict(result.category_scores).values()) if result.category_scores else 0.0
+        max_score = _safe_max_score(getattr(result, "category_scores", None))
 
         body = {
             "safe": not flagged,
@@ -202,7 +223,7 @@ async def moderate_image(request: Request, input: ImageInput, api_key: str = Dep
         return {
             "safe": bool(parsed.get("safe", True)),
             "categories": parsed.get("categories", []),
-            "confidence": float(parsed.get("confidence", 0.0)),
+            "confidence": _to_float(parsed.get("confidence", 0.0)),
             "suggested_action": parsed.get("suggested_action", "allow"),
         }
     except Exception as e:
