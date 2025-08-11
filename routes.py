@@ -17,6 +17,15 @@ client = openai.OpenAI(api_key=OPENAI_API_KEY)
 # ==== API Key Auth ====
 api_key_header = APIKeyHeader(name="x-api-key", auto_error=False)
 
+def _safe_max_score(scores) -> float:
+    try:
+        d = dict(scores) if scores is not None else {}
+        vals = [float(v) for v in d.values() if isinstance(v, (int, float)) and v is not None]
+        return max(vals) if vals else 0.0
+    except Exception:
+        return 0.0
+
+
 def get_api_key(request: Request, api_key: str = Security(api_key_header)) -> str:
     init_db()
     # 1) Try DB-backed keys
@@ -139,7 +148,7 @@ async def moderate_text(request: Request, input: TextInput, api_key: str = Depen
 
         flagged = result.flagged
         categories = [cat for cat, val in dict(result.categories).items() if val]
-        max_score = max(dict(result.category_scores).values()) if result.category_scores else 0.0
+        max_score = _safe_max_score(getattr(result, "category_scores", None))
 
         body = {
             "safe": not flagged,
@@ -181,6 +190,7 @@ async def moderate_image(request: Request, input: ImageInput, api_key: str = Dep
             ],
             max_tokens=300
         )
+
         result_text = response.choices[0].message.content
         parsed = _extract_json(result_text)
 
