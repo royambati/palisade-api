@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Depends, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.concurrency import iterate_in_threadpool
@@ -6,8 +6,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.routing import APIRoute
 import logging, json, uuid, time, pathlib
 
-from config import LOG_LEVEL
-from db import init_db
+from config import LOG_LEVEL, ADMIN_TOKEN
+from db import init_db, SessionLocal, RequestLog, ApiKey
 from routes import router
 from routes_keys import router as keys_router
 
@@ -112,24 +112,96 @@ app.add_middleware(LoggingMiddleware)
 app.include_router(router)        # /moderate/*
 app.include_router(keys_router)   # /keys/* (create/revoke/etc.)
 
-# ===== Health & static test/admin pages =====
+# ===== Admin logs API =====
+def verify_admin(request: Request):
+    token = request.query_params.get("admin_token")
+    if token != ADMIN_TOKEN:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+@app.get("/admin/logs")
+def get_logs(_: str = Depends(verify_admin)):
+    db = SessionLocal()
+    try:
+        rows = (
+            db.query(RequestLog, ApiKey.email)
+            .join(ApiKey, RequestLog.api_key_id == ApiKey.id, isouter=True)
+            .order_by(RequestLog.created_at.desc())
+            .limit(500)
+            .all()
+        )
+        return [
+            {
+                "email": email or "(no email)",
+                "endpoint": r.endpoint,
+                "status_code": r.status_code,
+                "duration_ms": r.duration_ms,
+                "payload": json.loads(r.payload_json or "{}"),
+                "created_at": r.created_at.isoformat() if hasattr(r, "created_at") and r.created_at else None
+            }
+            for r, email in rows
+        ]
+    finally:
+        db.close()
+
+# ===== Health & admin dashboard =====
 @app.get("/", tags=["Health"])
 def health():
     return {"status": "ok"}
 
-@app.get("/test", response_class=HTMLResponse)
-async def test_page():
-    p = pathlib.Path("test.html")
-    if p.exists():
-        return HTMLResponse(p.read_text(encoding="utf-8"))
-    return HTMLResponse("<h3>Missing test.html</h3>")
-
-from fastapi.responses import HTMLResponse as _HTMLResponse
-import pathlib as _pl
-
-@app.get("/admin", response_class=_HTMLResponse)
+@app.get("/admin", response_class=HTMLResponse)
 async def admin_page():
-    p = _pl.Path("admin.html")
-    if p.exists():
-        return _HTMLResponse(p.read_text(encoding="utf-8"))
-    return _HTMLResponse("<h3>Missing admin.html</h3>")
+    html_content = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="UTF-8">
+      <title>Palisade Admin</title>
+      <style>
+        table { border-collapse: collapse; width: 100%; }
+        th, td { border: 1px solid #ddd; padding: 8px; font-size: 14px; vertical-align: top; }
+        tr:nth-child(even) { background: #f9f9f9; }
+        th { background: #333; color: white; position: sticky; top: 0; }
+        input { margin-bottom: 10px; padding: 5px; width: 300px; }
+        pre { max-width: 400px; white-space: pre-wrap; word-wrap: break-word; }
+      </style>
+    </head>
+    <body>
+      <h2>Palisade Request Logs</h2>
+      <input type="text" id="filter" placeholder="Search email or endpoint...">
+      <table id="logs">
+        <thead>
+          <tr><th>Email</th><th>Endpoint</th><th>Request</th><th>Response</th><th>Duration</th><th>Status</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+
+      <script>
+        const token = prompt("Enter admin token:");
+        fetch(`/admin/logs?admin_token=${token}`)
+          .then(r => r.json())
+          .then(data => {
+            const tbody = document.querySelector("#logs tbody");
+            data.forEach(row => {
+              const tr = document.createElement("tr");
+              tr.innerHTML = `
+                <td>${row.email}</td>
+                <td>${row.endpoint}</td>
+                <td><pre>${JSON.stringify(row.payload.input || {}, null, 2)}</pre></td>
+                <td><pre>${JSON.stringify(row.payload.response || {}, null, 2)}</pre></td>
+                <td>${row.duration_ms} ms</td>
+                <td>${row.status_code}</td>
+              `;
+              tbody.appendChild(tr);
+            });
+            document.getElementById("filter").addEventListener("input", function() {
+              const q = this.value.toLowerCase();
+              document.querySelectorAll("#logs tbody tr").forEach(tr => {
+                tr.style.display = tr.innerText.toLowerCase().includes(q) ? "" : "none";
+              });
+            });
+          });
+      </script>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html_content)
