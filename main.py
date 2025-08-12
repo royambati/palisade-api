@@ -148,6 +148,54 @@ def get_logs(_: str = Depends(verify_admin)):
 def health():
     return {"status": "ok"}
 
+@app.get("/admin/data", response_class=JSONResponse)
+async def admin_data():
+    """
+    Returns the latest request logs for the admin dashboard.
+    """
+    db: Session = SessionLocal()
+    try:
+        stmt = (
+            select(
+                RequestLog.created_at,
+                ApiKey.name.label("user_email"),
+                RequestLog.endpoint,
+                RequestLog.moderation_result,
+                RequestLog.duration_ms,
+                RequestLog.status_code
+            )
+            .outerjoin(ApiKey, RequestLog.api_key_id == ApiKey.id)
+            .order_by(RequestLog.created_at.desc())
+            .limit(100)
+        )
+        rows = db.execute(stmt).all()
+
+        results = []
+        for r in rows:
+            try:
+                moderation_result = (
+                    r.moderation_result
+                    if isinstance(r.moderation_result, dict)
+                    else pyjson.loads(r.moderation_result or "{}")
+                )
+            except Exception:
+                moderation_result = {}
+
+            results.append({
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+                "user_email": r.user_email or "",
+                "endpoint": r.endpoint,
+                "request_content": moderation_result.get("input", {}),
+                "response": moderation_result.get("response", {}),
+                "duration_ms": r.duration_ms,
+                "status_code": r.status_code,
+            })
+
+        return JSONResponse(content=results)
+
+    finally:
+        db.close()
+
 @app.get("/admin", response_class=HTMLResponse)
 async def admin_page():
     html_content = """
