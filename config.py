@@ -6,6 +6,8 @@ load_dotenv()
 # Core
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "changeme-admin-token")
+
 # Database (SQLite dev by default; set to Postgres/Supabase in prod)
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./palisade.db")
 
