@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Palisade Admin</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-50 text-slate-900">
+  <div class="max-w-7xl mx-auto p-6">
+    <header class="flex items-center justify-between mb-6">
+      <div class="flex items-center gap-3">
+        <div class="w-9 h-9 rounded-2xl bg-indigo-600"></div>
+        <h1 class="text-2xl font-semibold">Palisade Admin</h1>
+      </div>
+      <div class="flex items-center gap-3">
+        <input id="apiBase" type="text" placeholder="API base (e.g. https://palisade-api-xh95.onrender.com)" class="w-[440px] px-3 py-2 rounded-xl border border-slate-300 bg-white" />
+        <input id="adminToken" type="password" placeholder="ADMIN_TOKEN" class="w-[300px] px-3 py-2 rounded-xl border border-slate-300 bg-white" />
+        <button id="saveCfg" class="px-4 py-2 rounded-xl bg-slate-900 text-white">Save</button>
+      </div>
+    </header>
+
+    <nav class="flex gap-2 mb-5">
+      <button data-tab="users" class="tab px-4 py-2 rounded-xl bg-white border border-slate-200">Users</button>
+      <button data-tab="keys" class="tab px-4 py-2 rounded-xl bg-white border border-slate-200">API Keys</button>
+      <button data-tab="logs" class="tab px-4 py-2 rounded-xl bg-white border border-slate-200">Logs</button>
+    </nav>
+
+    <!-- USERS TAB -->
+    <section id="tab-users" class="hidden">
+      <div class="flex items-end gap-3 mb-3">
+        <input id="usersSearch" type="text" placeholder="Search email…" class="px-3 py-2 rounded-xl border border-slate-300 bg-white" />
+        <button id="refreshUsers" class="px-4 py-2 rounded-xl bg-indigo-600 text-white">Refresh</button>
+      </div>
+      <div class="overflow-hidden rounded-2xl border border-slate-200 bg-white">
+        <table class="w-full text-left">
+          <thead class="bg-slate-50 text-slate-500 text-sm">
+            <tr>
+              <th class="p-3">Email</th>
+              <th class="p-3">Keys</th>
+              <th class="p-3">Created</th>
+            </tr>
+          </thead>
+          <tbody id="usersTbody" class="divide-y"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- KEYS TAB -->
+    <section id="tab-keys" class="hidden">
+      <div class="flex items-end gap-3 mb-3">
+        <input id="keysEmail" type="email" placeholder="User email" class="px-3 py-2 rounded-xl border border-slate-300 bg-white" />
+        <button id="loadKeys" class="px-4 py-2 rounded-xl bg-indigo-600 text-white">Load Keys</button>
+        <button id="createKey" class="px-4 py-2 rounded-xl bg-slate-900 text-white">Create Key</button>
+      </div>
+      <div class="overflow-hidden rounded-2xl border border-slate-200 bg-white">
+        <table class="w-full text-left">
+          <thead class="bg-slate-50 text-slate-500 text-sm">
+            <tr>
+              <th class="p-3">Key</th>
+              <th class="p-3">Email</th>
+              <th class="p-3">Active</th>
+              <th class="p-3">Created</th>
+            </tr>
+          </thead>
+          <tbody id="keysTbody" class="divide-y"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- LOGS TAB -->
+    <section id="tab-logs" class="hidden">
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
+        <input id="logsEmail" type="text" placeholder="Filter by email (optional)" class="px-3 py-2 rounded-xl border border-slate-300 bg-white" />
+        <input id="logsQuery" type="text" placeholder="Search in request/response (optional)" class="px-3 py-2 rounded-xl border border-slate-300 bg-white" />
+        <input id="logsFrom" type="datetime-local" class="px-3 py-2 rounded-xl border border-slate-300 bg-white" />
+        <input id="logsTo" type="datetime-local" class="px-3 py-2 rounded-xl border border-slate-300 bg-white" />
+      </div>
+      <div class="flex gap-3 mb-4">
+        <button id="refreshLogs" class="px-4 py-2 rounded-xl bg-indigo-600 text-white">Search</button>
+        <button id="clearFilters" class="px-4 py-2 rounded-xl bg-slate-200">Clear</button>
+      </div>
+      <div class="overflow-hidden rounded-2xl border border-slate-200 bg-white">
+        <table class="w-full text-left">
+          <thead class="bg-slate-50 text-slate-500 text-sm">
+            <tr>
+              <th class="p-3">Time</th>
+              <th class="p-3">Email</th>
+              <th class="p-3">Endpoint</th>
+              <th class="p-3">Status</th>
+              <th class="p-3">Preview</th>
+              <th class="p-3">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="logsTbody" class="divide-y"></tbody>
+        </table>
+      </div>
+      <div class="flex items-center justify-between mt-3">
+        <div id="logsMeta" class="text-sm text-slate-500"></div>
+        <div class="flex gap-2">
+          <button id="prevPage" class="px-3 py-2 rounded-xl border">Prev</button>
+          <button id="nextPage" class="px-3 py-2 rounded-xl border">Next</button>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <!-- Modals -->
+  <dialog id="modalJson" class="rounded-2xl p-0 w-11/12 md:w-3/4">
+    <div class="p-4 border-b flex items-center justify-between">
+      <h3 class="font-semibold">Log Detail</h3>
+      <button onclick="document.getElementById('modalJson').close()" class="px-3 py-1 rounded-lg border">Close</button>
+    </div>
+    <pre id="modalContent" class="p-4 overflow-auto max-h-[70vh] bg-slate-50"></pre>
+  </dialog>
+
+  <script>
+    // --- basic state ---
+    const state = {
+      apiBase: localStorage.getItem('apiBase') || '',
+      adminToken: localStorage.getItem('adminToken') || '',
+      page: 0,
+      pageSize: 25,
+      nextCursor: null,
+      prevCursors: [],
+    };
+
+    // inputs
+    const apiBaseEl = document.getElementById('apiBase');
+    const adminTokenEl = document.getElementById('adminToken');
+    apiBaseEl.value = state.apiBase;
+    adminTokenEl.value = state.adminToken;
+
+    document.getElementById('saveCfg').onclick = () => {
+      state.apiBase = apiBaseEl.value.trim();
+      state.adminToken = adminTokenEl.value.trim();
+      localStorage.setItem('apiBase', state.apiBase);
+      localStorage.setItem('adminToken', state.adminToken);
+      alert('Saved');
+    };
+
+    // tabs
+    const tabs = document.querySelectorAll('.tab');
+    const sections = ['users', 'keys', 'logs'];
+    tabs.forEach(btn => btn.addEventListener('click', () => showTab(btn.dataset.tab)));
+    function showTab(name) {
+      sections.forEach(id => {
+        document.getElementById('tab-' + id).classList.toggle('hidden', id !== name);
+      });
+      tabs.forEach(b => b.classList.toggle('bg-slate-900', b.dataset.tab === name));
+      tabs.forEach(b => b.classList.toggle('text-white', b.dataset.tab === name));
+      if (name === 'users') loadUsers();
+      if (name === 'logs') loadLogs(true);
+    }
+    showTab('users');
+
+    // helpers
+    function hdr() {
+      return {
+        'Content-Type': 'application/json',
+        'X-Admin-Token': state.adminToken,
+      };
+    }
+    async function http(path, opts={}) {
+      const url = state.apiBase + path;
+      const res = await fetch(url, { ...opts, headers: { ...(opts.headers||{}), ...hdr() } });
+      if (!res.ok) throw new Error('HTTP ' + res.status + ' – ' + await res.text());
+      return res.json();
+    }
+
+    // USERS
+    async function loadUsers() {
+      const q = document.getElementById('usersSearch').value.trim();
+      const data = await http('/admin/users' + (q? ('?q=' + encodeURIComponent(q)) : ''));
+      const tbody = document.getElementById('usersTbody');
+      tbody.innerHTML = '';
+      data.forEach(row => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td class="p-3">${row.email}</td>
+          <td class="p-3">${row.key_count}</td>
+          <td class="p-3 text-slate-500 text-sm">${new Date(row.created_at).toLocaleString()}</td>
+        `;
+        tbody.appendChild(tr);
+      });
+    }
+    document.getElementById('refreshUsers').onclick = loadUsers;
+
+    // KEYS
+    async function loadKeys() {
+      const email = document.getElementById('keysEmail').value.trim();
+      if (!email) return alert('Enter an email');
+      const data = await http('/admin/keys?email=' + encodeURIComponent(email));
+      const tbody = document.getElementById('keysTbody');
+      tbody.innerHTML = '';
+      data.forEach(k => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td class="p-3 font-mono">${k.key}</td>
+          <td class="p-3">${k.email}</td>
+          <td class="p-3">${k.active ? '✅' : '❌'}</td>
+          <td class="p-3 text-slate-500 text-sm">${new Date(k.created_at).toLocaleString()}</td>
+        `;
+        tbody.appendChild(tr);
+      });
+    }
+    document.getElementById('loadKeys').onclick = loadKeys;
+    document.getElementById('createKey').onclick = async () => {
+      const email = document.getElementById('keysEmail').value.trim();
+      if (!email) return alert('Enter an email first');
+      await http('/admin/keys', { method: 'POST', body: JSON.stringify({ email }) });
+      await loadKeys();
+      alert('Key created');
+    };
+
+    // LOGS
+    async function loadLogs(reset=false) {
+      const email = document.getElementById('logsEmail').value.trim();
+      const q = document.getElementById('logsQuery').value.trim();
+      const from = document.getElementById('logsFrom').value;
+      const to = document.getElementById('logsTo').value;
+      let url = '/admin/logs?limit=' + state.pageSize;
+      if (email) url += '&email=' + encodeURIComponent(email);
+      if (q) url += '&q=' + encodeURIComponent(q);
+      if (from) url += '&from=' + encodeURIComponent(new Date(from).toISOString());
+      if (to) url += '&to=' + encodeURIComponent(new Date(to).toISOString());
+      if (!reset && state.nextCursor) url += '&cursor=' + encodeURIComponent(state.nextCursor);
+
+      const res = await http(url);
+      const tbody = document.getElementById('logsTbody');
+      tbody.innerHTML = '';
+      res.items.forEach(item => {
+        const tr = document.createElement('tr');
+        const preview = (item.request_preview || item.response_preview || '').slice(0,100)
+          .replaceAll('<','&lt;').replaceAll('>','&gt;');
+        tr.innerHTML = `
+          <td class="p-3 text-sm text-slate-600">${new Date(item.created_at).toLocaleString()}</td>
+          <td class="p-3">${item.email || '—'}</td>
+          <td class="p-3">${item.path}</td>
+          <td class="p-3">${item.status_code}</td>
+          <td class="p-3 text-sm text-slate-500">${preview}</td>
+          <td class="p-3">
+            <button class="px-3 py-1 rounded-lg border" data-json='${JSON.stringify(item).replaceAll("'", "&apos;")}'>View</button>
+          </td>
+        `;
+        tr.querySelector('button').onclick = () => {
+          const pretty = JSON.stringify(item, null, 2);
+          document.getElementById('modalContent').textContent = pretty;
+          document.getElementById('modalJson').showModal();
+        };
+        tbody.appendChild(tr);
+      });
+      state.prevCursors.push(state.nextCursor);
+      state.nextCursor = res.next_cursor || null;
+      document.getElementById('logsMeta').textContent = `Showing ${res.items.length} • next: ${state.nextCursor ? 'yes' : 'no'}`;
+    }
+
+    document.getElementById('refreshLogs').onclick = () => loadLogs(true);
+    document.getElementById('clearFilters').onclick = () => {
+      ['logsEmail','logsQuery','logsFrom','logsTo'].forEach(id => document.getElementById(id).value = '');
+      state.prevCursors = []; state.nextCursor = null; loadLogs(true);
+    };
+    document.getElementById('nextPage').onclick = () => {
+      if (!state.nextCursor) return;
+      loadLogs(false);
+    };
+    document.getElementById('prevPage').onclick = () => {
+      if (state.prevCursors.length <= 1) return; // first element is null
+      state.prevCursors.pop(); // current
+      state.nextCursor = state.prevCursors.pop() || null; // previous of previous
+      loadLogs(false);
+    };
+  </script>
+</body>
+</html>
