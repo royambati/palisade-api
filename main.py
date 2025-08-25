@@ -5,6 +5,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.concurrency import iterate_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.routing import APIRoute
+from routes_admin import router as admin_router
 import logging, json, uuid, time, pathlib
 
 from config import LOG_LEVEL, ADMIN_TOKEN
@@ -111,7 +112,9 @@ app.add_middleware(LoggingMiddleware)
 
 # ===== Mount routers =====
 app.include_router(router)        # /moderate/*
-app.include_router(keys_router)   # /keys/* (create/revoke/etc.)
+app.include_router(keys_router)
+app.include_router(admin_router)
+# /keys/* (create/revoke/etc.)
 
 # ===== Admin logs API =====
 def verify_admin(request: Request):
